@@ -24,6 +24,7 @@ mod models;
 mod hasher;
 mod utils;
 mod api;
+mod graph_bridge;
 
 use utils::*;
 use models::*;
@@ -81,7 +82,7 @@ async fn main() {
         accepted_shares: Arc::new(AtomicUsize::new(0)),
         rejected_shares: Arc::new(AtomicUsize::new(0)),
         hashrate_samples: Arc::new(Mutex::new(Vec::new())),
-        version: String::from("1.0.0"),
+        version: String::from("2.0.0"),
     });
 
     // Spawn worker threads for processing jobs
@@ -110,6 +111,8 @@ async fn main() {
                             api_hash_count.fetch_add(1, Ordering::Relaxed);
 
                             if meets_target(&hash, &job.target) {
+                                println!("SUBMITTING SHARE TO BACKEND!");
+                                
                                 let submit_msg = SubmitMessage {
                                     r#type: String::from("submit"),
                                     miner_id: miner_id.to_string(),
@@ -149,7 +152,7 @@ async fn main() {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let count = hash_count.load(Ordering::Relaxed);
-            println!("{}: {} hashes/second", "Hash rate".cyan(), (count - last_count) / 5);
+            println!("{}: {:.2} hashes/second", "Hash rate".cyan(), (count - last_count) as f64 / 5.0);
             last_count = count;
         }
     });

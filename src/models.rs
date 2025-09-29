@@ -66,7 +66,6 @@ pub struct ServerMessage {
     pub job_id: Option<String>,
     pub data: Option<String>,
     pub target: Option<String>,
-    pub pplns_score: Option<f64>,
 }
 
 #[derive(Clone, Debug)]

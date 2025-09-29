@@ -1,5 +1,6 @@
 use primitive_types::U256;
 use rand_mt::Mt19937GenRand64;
+use crate::graph_bridge::ffi;
 use std::time::{Duration, Instant};
 
 pub const GRAPH_SIZE: u16 = 2008;
@@ -25,18 +26,15 @@ impl HCGraphUtil {
         u64::from_str_radix(hex_string, 16).expect("Failed to convert hex to u64")
     }
 
-    fn read_le_u64(&self, bytes: &[u8]) -> u64 {
-        let arr: [u8; 8] = bytes[..8].try_into().expect("Slice with incorrect length");
-        u64::from_le_bytes(arr)
-    }
-    
-    fn get_u64(&self, data: &[u8], pos: usize) -> u64 {
-        self.read_le_u64(&data[pos * 8..(pos + 1) * 8])
-    }
-    
     fn extract_seed_from_hash(&self, hash: &U256) -> u64 {
-        let bytes = hash.to_little_endian();
-        self.get_u64(&bytes, 0)
+        hash.low_u64()
+    }
+
+    fn extract_seed_from_hash_hex(&self, hash_hex: &str) -> u64 {
+        let mut bytes = hex::decode(hash_hex).expect("invalid hex");
+        bytes.reverse(); // Match C++ implementation that reverses hash bytes
+        let arr: [u8; 8] = bytes[0..8].try_into().expect("slice len");
+        u64::from_le_bytes(arr)
     }
     
 
@@ -146,5 +144,93 @@ impl HCGraphUtil {
             return vec![];
         }
         path
+    }
+
+    pub fn get_worker_grid_size(&self, hash_hex: &str) -> u16 {
+        let grid_size_segment = &hash_hex[0..8];
+        let grid_size: u64 = self.hex_to_u64(grid_size_segment);
+        let min_grid_size = 1892u64;
+        let max_grid_size = 1920u64;
+        let grid_size_final = min_grid_size + (grid_size % (max_grid_size - min_grid_size));
+        grid_size_final as u16
+    }
+
+    pub fn get_queen_bee_grid_size(&self, worker_size: u16) -> u16 {
+        GRAPH_SIZE - worker_size
+    }
+
+
+    fn generate_graph_v3_from_seed(&self, seed: u64, grid_size: u16, percentage_x10: u16) -> Vec<Vec<bool>> {
+        let grid_size_usize = grid_size as usize;
+        let mut graph = vec![vec![false; grid_size_usize]; grid_size_usize];
+
+        let range: u64 = 1000;
+        let threshold: u64 = (percentage_x10 as u64 * range) / 1000;
+
+        // Use C++ std::uniform_int_distribution through FFI bridge
+        let mut generator = ffi::create_graph_generator(seed, range);
+        
+        for i in 0..grid_size_usize {
+            for j in (i + 1)..grid_size_usize {
+                let random_value = generator.pin_mut().next_random();
+                let edge_exists = random_value < threshold;
+                
+                graph[i][j] = edge_exists;
+                graph[j][i] = edge_exists;
+            }
+        }
+
+        graph
+    }
+
+
+    pub fn find_hamiltonian_cycle_v3_hex(&self, graph_hash_hex: &str, graph_size: u16, percentage_x10: u16, timeout_ms: u64) -> Vec<u16> {
+        let mut path: Vec<u16> = Vec::with_capacity(graph_size as usize);
+        let mut visited = vec![false; graph_size as usize];
+        let seed = self.extract_seed_from_hash_hex(graph_hash_hex);
+        
+        let edges = self.generate_graph_v3_from_seed(seed, graph_size, percentage_x10);
+
+        let start_node: u16 = 0;
+        let start_time = Instant::now();
+
+        fn dfs(
+            current: u16,
+            visited: &mut [bool],
+            path: &mut Vec<u16>,
+            edges: &Vec<Vec<bool>>,
+            start_time: Instant,
+            timeout_ms: u64,
+            graph_size: u16,
+        ) -> bool {
+            if start_time.elapsed() > Duration::from_millis(timeout_ms) {
+                return false;
+            }
+
+            path.push(current);
+            visited[current as usize] = true;
+
+            if path.len() == graph_size as usize && edges[current as usize][0] {
+                return true;
+            }
+
+            for next in 0..graph_size as usize {
+                if edges[current as usize][next] && !visited[next] {
+                    if dfs(next as u16, visited, path, edges, start_time, timeout_ms, graph_size) {
+                        return true;
+                    }
+                }
+            }
+
+            visited[current as usize] = false;
+            path.pop();
+            false
+        }
+
+        if dfs(start_node, &mut visited, &mut path, &edges, start_time, timeout_ms, graph_size) {
+            return path;
+        }
+
+        Vec::new()
     }
 }
