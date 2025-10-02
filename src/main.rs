@@ -24,6 +24,7 @@ mod models;
 mod hasher;
 mod utils;
 mod api;
+mod graph_bridge;
 
 use utils::*;
 use models::*;
@@ -69,7 +70,7 @@ async fn main() {
     // Handle Ctrl+C signal
     tokio::spawn(handle_exit_signals());
 
-    let bailout_timer = args.vdftime_parsed;
+    let bailout_timer = Some(args.vdftime1_parsed);
     let miner_id = args.address.unwrap();
 
     let (server_sender, server_receiver) = mpsc::channel::<String>();
@@ -81,7 +82,7 @@ async fn main() {
         accepted_shares: Arc::new(AtomicUsize::new(0)),
         rejected_shares: Arc::new(AtomicUsize::new(0)),
         hashrate_samples: Arc::new(Mutex::new(Vec::new())),
-        version: String::from("1.0.0"),
+        version: String::from("2.0.0"),
     });
 
     // Spawn worker threads for processing jobs
@@ -90,12 +91,11 @@ async fn main() {
         let current_job_loop = Arc::clone(&current_job);
         let hash_count = Arc::clone(&hash_count);
         let server_sender_clone = server_sender.clone();
-        let  miner_id = miner_id.clone();
+        let miner_id = miner_id.clone();
         let api_hash_count = Arc::clone(&miner_state.hash_count);
 
         thread::spawn(move || {
             let mut hc_util = HCGraphUtil::new(bailout_timer);
-            let mut hc_util_verify = HCGraphUtil::new(bailout_timer);
             loop {
                 let job_option = {
                     let job_guard = current_job_loop.blocking_lock();
@@ -106,29 +106,28 @@ async fn main() {
                     loop {
                         let nonce = generate_nonce();
 
-                        if let Some((hash, path_hex)) = compute_hash_no_vdf(&("".to_owned() + &job.data + &nonce), &mut hc_util) {
+                        if let Some((hash, path_hex)) = compute_hash_no_vdf(&("" .to_owned() + &job.data + &nonce), &mut hc_util, args.vdftime1_parsed, args.vdftime2_parsed) {
                             hash_count.fetch_add(1, Ordering::Relaxed);
                             api_hash_count.fetch_add(1, Ordering::Relaxed);
 
                             if meets_target(&hash, &job.target) {
-                                if let Some((_hash_v, _path_hex_v)) = compute_hash_no_vdf_verify(&("".to_owned() + &job.data + &nonce), &mut hc_util_verify) {
-                                    if meets_target(&hash, &job.target) {
-                                        let submit_msg = SubmitMessage {
-                                            r#type: String::from("submit"),
-                                            miner_id: miner_id.to_string(),
-                                            nonce: nonce,
-                                            job_id: job.job_id.clone(),
-                                            path: path_hex,
-                                        };
-        
-                                        let msg = serde_json::to_string(&submit_msg).unwrap();
-                                        let _ = server_sender_clone.send(msg);
-        
-                                        let mut job_guard = current_job_loop.blocking_lock();
-                                        *job_guard = None;
-                                        break;
-                                    }
-                                }
+                                println!("SUBMITTING SHARE TO BACKEND!");
+                                
+                                let submit_msg = SubmitMessage {
+                                    r#type: String::from("submit"),
+                                    miner_id: miner_id.to_string(),
+                                    nonce: nonce,
+                                    job_id: job.job_id.clone(),
+                                    path: path_hex,
+                                };
+
+                                let msg = serde_json::to_string(&submit_msg).unwrap();
+                                let _ = server_sender_clone.send(msg);
+
+                                // Clear the current job
+                                let mut job_guard = current_job_loop.blocking_lock();
+                                *job_guard = None;
+                                break;
                             }
 
                             // Check if there's a new job
@@ -153,7 +152,7 @@ async fn main() {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let count = hash_count.load(Ordering::Relaxed);
-            println!("{}: {} hashes/second", "Hash rate".cyan(), (count - last_count) / 5);
+            println!("{}: {:.2} hashes/second", "Hash rate".cyan(), (count - last_count) as f64 / 5.0);
             last_count = count;
         }
     });
@@ -248,6 +247,12 @@ async fn main() {
                                 }
                                 "accepted" => {
                                     miner_state.accepted_shares.fetch_add(1, Ordering::Relaxed);
+                                    println!(
+                                        "{}",
+                                        format!("Share accepted")
+                                            .bold()
+                                            .green()
+                                    );
                                     display_share_accepted();
                                 }
                                 "rejected" => {

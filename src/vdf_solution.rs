@@ -1,23 +1,24 @@
 use primitive_types::U256;
 use rand_mt::Mt19937GenRand64;
-use std::{iter, time::{Duration, Instant}};
+use crate::graph_bridge::ffi;
+use std::time::{Duration, Instant};
 
 pub const GRAPH_SIZE: u16 = 2008;
 
 pub struct HCGraphUtil {
     start_time: Instant,
-    vdf_bailout: u64,
+    vdf_bailout: u64
 }
 
 impl HCGraphUtil {
     pub fn new(vdf_bailout: Option<u64>) -> Self {
         let bailout_timer: u64 = match vdf_bailout {
-            Some(timer) => timer,
-            None => 1000, // default to 1 second
+            Some(timer) => { timer },
+            None => { 1000 } // default to 1 second
         };
         HCGraphUtil {
             start_time: Instant::now(),
-            vdf_bailout: bailout_timer,
+            vdf_bailout: bailout_timer
         }
     }
 
@@ -25,19 +26,17 @@ impl HCGraphUtil {
         u64::from_str_radix(hex_string, 16).expect("Failed to convert hex to u64")
     }
 
-    fn read_le_u64(&self, bytes: &[u8]) -> u64 {
-        let arr: [u8; 8] = bytes[..8].try_into().expect("Slice with incorrect length");
+    fn extract_seed_from_hash(&self, hash: &U256) -> u64 {
+        hash.low_u64()
+    }
+
+    fn extract_seed_from_hash_hex(&self, hash_hex: &str) -> u64 {
+        let mut bytes = hex::decode(hash_hex).expect("invalid hex");
+        bytes.reverse(); // Match C++ implementation that reverses hash bytes
+        let arr: [u8; 8] = bytes[0..8].try_into().expect("slice len");
         u64::from_le_bytes(arr)
     }
-
-    fn get_u64(&self, data: &[u8], pos: usize) -> u64 {
-        self.read_le_u64(&data[pos * 8..(pos + 1) * 8])
-    }
-
-    fn extract_seed_from_hash(&self, hash: &U256) -> u64 {
-        let bytes = hash.to_little_endian();
-        self.get_u64(&bytes, 0)
-    }
+    
 
     fn get_grid_size_v2(&self, hash: &U256) -> u16 {
         let hash_hex = format!("{:064x}", hash);
@@ -59,12 +58,12 @@ impl HCGraphUtil {
         let mut graph = vec![vec![false; grid_size]; grid_size];
         let num_edges = (grid_size * (grid_size - 1)) / 2;
         let bits_needed = num_edges;
-
+    
         let seed = self.extract_seed_from_hash(hash);
         let mut prng = Mt19937GenRand64::from(seed.to_le_bytes());
-
+    
         let mut bit_stream = Vec::with_capacity(bits_needed);
-
+    
         while bit_stream.len() < bits_needed {
             let random_bits_32: u32 = (prng.next_u64() & 0xFFFFFFFF) as u32;
             for j in (0..32).rev() {
@@ -85,38 +84,9 @@ impl HCGraphUtil {
                 graph[j][i] = edge_exists;
             }
         }
-
+    
         graph
-    }
-
-    fn _opt(&self, hash: &U256, grid_size: u16) -> Vec<Vec<bool>> {
-        let grid_size = grid_size as usize;
-        let mut graph = vec![vec![false; grid_size]; grid_size];
-        let num_edges = (grid_size * (grid_size - 1)) / 2;
-
-        let seed = self.extract_seed_from_hash(hash);
-        let mut prng = Mt19937GenRand64::from(seed.to_le_bytes());
-
-        // 位流生成作为一次性流，而不是存储在一个容器中
-        let mut bit_iterator = iter::from_fn(|| {
-            let random_bits_32: u32 = (prng.next_u64() & 0xFFFFFFFF) as u32;
-            Some(random_bits_32)
-        })
-        .flat_map(|bits| (0..32).rev().map(move |j| ((bits >> j) & 1) == 1))
-        .take(num_edges);
-
-        // 遍历整个图只为抓取必要的位
-        for i in 0..grid_size {
-            for j in (i + 1)..grid_size {
-                if let Some(edge_exists) = bit_iterator.next() {
-                    graph[i][j] = edge_exists;
-                    graph[j][i] = edge_exists;
-                }
-            }
-        }
-
-        graph
-    }
+    }    
 
     fn is_safe(&self, v: u16, graph: &Vec<Vec<bool>>, path: &[u16], pos: usize) -> bool {
         if !graph[path[pos - 1] as usize][v as usize] {
@@ -126,20 +96,6 @@ impl HCGraphUtil {
         for i in 0..pos {
             if path[i] == v {
                 return false;
-            }
-        }
-
-        true
-    }
-
-    fn is_safe_vp(&self, v: u16, graph: &Vec<Vec<bool>>, path: &[u16], pos: usize) -> bool {
-        if pos == 0 || !graph[path[pos - 1] as usize][v as usize] {
-            return false;
-        }
-
-        for &node in &path[..pos] {
-            if node == v {
-                return false; // 如果已经访问过，返回 false
             }
         }
 
@@ -176,65 +132,6 @@ impl HCGraphUtil {
         false
     }
 
-    fn hamiltonian_cycle_util_vp(
-        &mut self,
-        graph: &Vec<Vec<bool>>,
-        path: &mut [u16],
-        visited: &mut Vec<bool>,
-    ) -> bool {
-        let mut position_vertex_stack: Vec<(usize, usize)> = Vec::new();
-        let mut pos = 1;
-        let mut vertex = 1;
-        
-        loop {
-            let elapsed = self.start_time.elapsed();
-            if elapsed > Duration::from_millis(self.vdf_bailout) {
-                return false;
-            }
-    
-            // Check if the cycle completed
-            if pos == graph.len() {
-                if graph[path[pos - 1] as usize][path[0] as usize] {
-                    return true;
-                }
-                // If not a valid cycle, backtrack
-                if let Some((prev_pos, prev_vertex)) = position_vertex_stack.pop() {
-                    visited[path[prev_pos] as usize] = false;
-                    path[prev_pos] = u16::MAX;
-                    pos = prev_pos;
-                    vertex = prev_vertex + 1;
-                    continue;
-                }
-                return false;
-            }
-    
-            // Try to find next valid vertex
-            while vertex < graph.len() {
-                if !visited[vertex] && self.is_safe_vp(vertex as u16, graph, path, pos) {
-                    path[pos] = vertex as u16;
-                    visited[vertex] = true;
-                    position_vertex_stack.push((pos, vertex));
-                    pos += 1;
-                    vertex = 1;
-                    break;
-                }
-                vertex += 1;
-            }
-    
-            // If no valid vertex found, backtrack
-            if vertex >= graph.len() {
-                if let Some((prev_pos, prev_vertex)) = position_vertex_stack.pop() {
-                    visited[path[prev_pos] as usize] = false;
-                    path[prev_pos] = u16::MAX;
-                    pos = prev_pos;
-                    vertex = prev_vertex + 1;
-                } else {
-                    return false;
-                }
-            }
-        }
-    }
-
     pub fn find_hamiltonian_cycle_v2(&mut self, graph_hash: U256) -> Vec<u16> {
         let grid_size = self.get_grid_size_v2(&graph_hash);
         let graph = self.generate_graph_v2(&graph_hash, grid_size);
@@ -249,19 +146,91 @@ impl HCGraphUtil {
         path
     }
 
-    pub fn find_hamiltonian_cycle_vp(&mut self, graph_hash: U256) -> Vec<u16> {
-        let grid_size = self.get_grid_size_v2(&graph_hash);
-        let graph = self._opt(&graph_hash, grid_size);
+    pub fn get_worker_grid_size(&self, hash_hex: &str) -> u16 {
+        let grid_size_segment = &hash_hex[0..8];
+        let grid_size: u64 = self.hex_to_u64(grid_size_segment);
+        let min_grid_size = 1892u64;
+        let max_grid_size = 1920u64;
+        let grid_size_final = min_grid_size + (grid_size % (max_grid_size - min_grid_size));
+        grid_size_final as u16
+    }
 
-        let mut path = vec![u16::MAX; graph.len()];
-        path[0] = 0;
-        let mut visited = vec![false; graph.len()];
-        visited[0] = true;
-        self.start_time = Instant::now();
+    pub fn get_queen_bee_grid_size(&self, worker_size: u16) -> u16 {
+        GRAPH_SIZE - worker_size
+    }
 
-        if !self.hamiltonian_cycle_util_vp(&graph, &mut path, &mut visited) {
-            return vec![];
+
+    fn generate_graph_v3_from_seed(&self, seed: u64, grid_size: u16, percentage_x10: u16) -> Vec<Vec<bool>> {
+        let grid_size_usize = grid_size as usize;
+        let mut graph = vec![vec![false; grid_size_usize]; grid_size_usize];
+
+        let range: u64 = 1000;
+        let threshold: u64 = (percentage_x10 as u64 * range) / 1000;
+
+        // Use C++ std::uniform_int_distribution through FFI bridge
+        let mut generator = ffi::create_graph_generator(seed, range);
+        
+        for i in 0..grid_size_usize {
+            for j in (i + 1)..grid_size_usize {
+                let random_value = generator.pin_mut().next_random();
+                let edge_exists = random_value < threshold;
+                
+                graph[i][j] = edge_exists;
+                graph[j][i] = edge_exists;
+            }
         }
-        path
+
+        graph
+    }
+
+
+    pub fn find_hamiltonian_cycle_v3_hex(&self, graph_hash_hex: &str, graph_size: u16, percentage_x10: u16, timeout_ms: u64) -> Vec<u16> {
+        let mut path: Vec<u16> = Vec::with_capacity(graph_size as usize);
+        let mut visited = vec![false; graph_size as usize];
+        let seed = self.extract_seed_from_hash_hex(graph_hash_hex);
+        
+        let edges = self.generate_graph_v3_from_seed(seed, graph_size, percentage_x10);
+
+        let start_node: u16 = 0;
+        let start_time = Instant::now();
+
+        fn dfs(
+            current: u16,
+            visited: &mut [bool],
+            path: &mut Vec<u16>,
+            edges: &Vec<Vec<bool>>,
+            start_time: Instant,
+            timeout_ms: u64,
+            graph_size: u16,
+        ) -> bool {
+            if start_time.elapsed() > Duration::from_millis(timeout_ms) {
+                return false;
+            }
+
+            path.push(current);
+            visited[current as usize] = true;
+
+            if path.len() == graph_size as usize && edges[current as usize][0] {
+                return true;
+            }
+
+            for next in 0..graph_size as usize {
+                if edges[current as usize][next] && !visited[next] {
+                    if dfs(next as u16, visited, path, edges, start_time, timeout_ms, graph_size) {
+                        return true;
+                    }
+                }
+            }
+
+            visited[current as usize] = false;
+            path.pop();
+            false
+        }
+
+        if dfs(start_node, &mut visited, &mut path, &edges, start_time, timeout_ms, graph_size) {
+            return path;
+        }
+
+        Vec::new()
     }
 }
